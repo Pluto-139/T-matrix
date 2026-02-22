@@ -1,0 +1,8 @@
+Job started at Sun Feb 22 09:12:08 CET 2026
+Running on host: mtx02
+Allocated CPUs: 56
+=== Hubbard Phase Diagram (Vectorized & Exact Omega) ===
+Cores: 56
+Grid: 10x10 = 100 points
+Integration Mesh: n_q=24, n_k=24 (Vectorized)
+Physics: U=4.0t, Broadening=0.05, T_smear=0.005
