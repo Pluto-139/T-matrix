@@ -1,5 +1,4 @@
 import matplotlib
-
 matplotlib.use('Agg')
 
 import numpy as np
@@ -11,28 +10,26 @@ import os
 from scipy.integrate import simpson
 from scipy.optimize import brentq
 from tqdm import tqdm
+import vegas  # 新增：导入 vegas 积分库
 
+# 全局物理参数
 t = 1.0
 U = 4.0 * t
 BROADENING = 0.05 * t
 T_SMEARING = 0.005 * t
 
-
 def epsilon_k_continuous(kx, ky, tp):
     return -2 * t * (np.cos(kx) + np.cos(ky)) - 4 * tp * np.cos(kx) * np.cos(ky)
-     #return -2 * t * (np.cos(kx) + np.cos(ky)) - 2* tp * np.cos(kx + ky)
 
 def fermi_smooth(energies, mu):
     val = (energies - mu) / T_SMEARING
     val = np.clip(val, -100, 100)
     return 1.0 / (np.exp(val) + 1.0)
 
-
 def integrate_2d_simpson(f_val, x_grid, y_grid):
     return simpson(simpson(f_val, x=x_grid, axis=-1), x=y_grid, axis=-1)
 
-
-def compute_chemical_potential(target_density, tp, n_grid=200):
+def compute_chemical_potential(target_density, tp, n_grid=1000): # 调优：1000 已经足够收敛
     kx = np.linspace(-np.pi, np.pi, n_grid)
     ky = np.linspace(-np.pi, np.pi, n_grid)
     KX, KY = np.meshgrid(kx, ky)
@@ -53,8 +50,7 @@ def compute_chemical_potential(target_density, tp, n_grid=200):
     except ValueError:
         return mu_min if density_diff(mu_min) > 0 else mu_max
 
-
-def compute_free_energy(tp, mu, n_grid=200):
+def compute_free_energy(tp, mu, n_grid=1000):
     kx = np.linspace(-np.pi, np.pi, n_grid)
     ky = np.linspace(-np.pi, np.pi, n_grid)
     KX, KY = np.meshgrid(kx, ky)
@@ -65,9 +61,12 @@ def compute_free_energy(tp, mu, n_grid=200):
     energy = integrate_2d_simpson(eps * f, kx, ky) / (2 * np.pi) ** 2
     return energy
 
-
-def compute_interaction_energy_vegas(tp, mu_up, mu_down, n_p=100, nitn=10, neval=50000):
- 
+# ================= 新增：Vegas 蒙特卡洛积分核心 =================
+def compute_interaction_energy_vegas(tp, mu_up, mu_down, n_p=80, nitn=8, neval=50000):
+    """
+    使用 Vegas 替代原有的 compute_interaction_energy_vectorized。
+    消除了网格平移导致的非对称误差，极大降低内存占用。
+    """
     p_vec = np.linspace(-np.pi, np.pi, n_p)
     dp = p_vec[1] - p_vec[0]
     PX, PY = np.meshgrid(p_vec, p_vec)
@@ -77,35 +76,27 @@ def compute_interaction_energy_vegas(tp, mu_up, mu_down, n_p=100, nitn=10, neval
     
     @vegas.batchintegrand
     def integrand(x):
-        # x 形状为 (N, 4)，代表 N 个采样点，每个点是 (qx, qy, kx, ky)
         qx, qy = x[:, 0], x[:, 1]
         kx, ky = x[:, 2], x[:, 3]
         
-        # 计算外层分子 f_up(k) * f_down(q-k)
         eps_k = epsilon_k_continuous(kx, ky, tp)
         f_k_up = fermi_smooth(eps_k, mu_up)
         
-        # 注意：由于 epsilon_k_continuous 是 cos 的组合，具有天然周期性，所以无需做取模操作
         eps_kprime = epsilon_k_continuous(qx - kx, qy - ky, tp)
         f_kprime_down = fermi_smooth(eps_kprime, mu_down)
         
         numerator = f_k_up * f_kprime_down
-        
-        # 初始化结果数组
         res = np.zeros_like(numerator)
         
-        # ★ 核心优化：掩码过滤。只有分子明显大于 0 的有效点，才去计算极其昂贵的内层 P 积分
+        # 掩码过滤：只在分子非零（费米面附近）计算昂贵的内层积分
         mask = numerator > 1e-10
-        
         if not np.any(mask):
-            return res  # 如果这批点全在费米面外，直接返回全 0
+            return res
             
-        # 提取出落在费米面上的有效点
         qx_v, qy_v = qx[mask], qy[mask]
         eps_k_v, eps_kprime_v = eps_k[mask], eps_kprime[mask]
+        omega_v = eps_k_v + eps_kprime_v
         
-        omega_v = eps_k_v + eps_kprime_v  # 形状: (N_valid, )
-
         PX_prime = qx_v[:, np.newaxis, np.newaxis] - PX[np.newaxis, :, :]
         PY_prime = qy_v[:, np.newaxis, np.newaxis] - PY[np.newaxis, :, :]
         
@@ -118,22 +109,23 @@ def compute_interaction_energy_vegas(tp, mu_up, mu_down, n_p=100, nitn=10, neval
         D = denom_p_sum - omega_v[:, np.newaxis, np.newaxis]
         kernel = D / (D**2 + BROADENING**2)
         
+        # 内层 P 积分（黎曼和近似）
         chi_int = np.sum(num_p * kernel, axis=(1, 2)) * (dp**2) / (2 * np.pi)**2
         
         denominator_v = 1.0 + U * chi_int
-        
         res[mask] = numerator[mask] / denominator_v
-    
+        
         return res / (2 * np.pi)**4
 
+    # 初始化 4D 积分域 [-pi, pi]
     integ = vegas.Integrator([[-np.pi, np.pi]] * 4)
-
-    integ(integrand, nitn=5, neval=neval // 2)
-    
+    # 预热迭代：让 Vegas 寻找并锁定费米面轮廓
+    integ(integrand, nitn=4, neval=neval // 2)
+    # 正式高精度计算
     result = integ(integrand, nitn=nitn, neval=neval)
     
-    return result.mean  # result 包含了均值(mean)和统计误差(sdev)
-
+    return result.mean
+# ==============================================================
 
 def solve_phase_point_deltaE(args):
     tp_over_t, density, n_grid_mu = args
@@ -143,13 +135,17 @@ def solve_phase_point_deltaE(args):
         return 0.0
 
     try:
+        # 顺磁相 (Para)
         mu_para = compute_chemical_potential(density / 2.0, tp, n_grid=n_grid_mu)
         E_free_para = 2.0 * compute_free_energy(tp, mu_para, n_grid=n_grid_mu)
 
-        E_int_para = compute_interaction_energy_vectorized(tp, mu_para, mu_para, n_q=48, n_k=48)
+        # 替换为 Vegas 计算相互作用能
+        # neval=50000 是一个平衡速度与精度的经验值，如果需要更平滑的相界可以增加到 100000
+        E_int_para = compute_interaction_energy_vegas(tp, mu_para, mu_para, neval=50000)
 
         E_total_para = E_free_para + U * E_int_para
 
+        # 铁磁相 (Ferro, 假设完全极化)
         mu_ferro = compute_chemical_potential(density, tp, n_grid=n_grid_mu)
         E_free_ferro = compute_free_energy(tp, mu_ferro, n_grid=n_grid_mu)
         E_total_ferro = E_free_ferro
@@ -157,14 +153,15 @@ def solve_phase_point_deltaE(args):
         return E_total_para - E_total_ferro
 
     except Exception as e:
+        # 增加错误打印，防止静默失败导致相图异常
+        print(f"\n[Error] at tp={tp_over_t:.3f}, dens={density:.4f}: {str(e)}")
         return 0.0
-
 
 def main():
     tp_vals = np.linspace(-0.45, -0.55, 10)
     dens_vals = np.linspace(0.01, 0.05, 10)
 
-    n_grid_mu = 2000
+    n_grid_mu = 1000 # 优化值
 
     tasks = [(tp, dens, n_grid_mu) for tp in tp_vals for dens in dens_vals]
 
@@ -173,15 +170,16 @@ def main():
     except:
         n_cores = mp.cpu_count()
 
-    print(f"=== Hubbard Phase Diagram (Vectorized & Exact Omega) ===")
+    print(f"=== Hubbard Phase Diagram (Vegas Adaptive Integration) ===")
     print(f"Cores: {n_cores}")
     print(f"Grid: {len(tp_vals)}x{len(dens_vals)} = {len(tasks)} points")
-    print(f"Integration Mesh: n_q=24, n_k=24 (Vectorized)")
+    print(f"Integration Method: Vegas Monte Carlo (neval=50000)")
     print(f"Physics: U={U / t}t, Broadening={BROADENING}, T_smear={T_SMEARING}")
 
     start_time = time.time()
 
     with mp.Pool(n_cores) as pool:
+        # 使用 tqdm 显示多进程进度条
         results = list(tqdm(pool.imap(solve_phase_point_deltaE, tasks, chunksize=1), total=len(tasks)))
 
     elapsed = (time.time() - start_time) / 60
@@ -189,7 +187,7 @@ def main():
 
     delta_E_grid = np.array(results).reshape(len(tp_vals), len(dens_vals))
 
-    filename_base = f"two_U{U:.1f}_tp{tp_vals[0]:.1f}_{tp_vals[-1]:.1f}"
+    filename_base = f"two_U{U:.1f}_tp{tp_vals[0]:.1f}_{tp_vals[-1]:.1f}_Vegas"
     np.savez(f"results_{filename_base}.npz", tp=tp_vals, dens=dens_vals, delta_E=delta_E_grid)
 
     plt.figure(figsize=(10, 8))
@@ -207,11 +205,10 @@ def main():
 
     plt.xlabel("Density n")
     plt.ylabel("t'/t")
-    plt.title(f"Phase Diagram (Vectorized High-Precision)\nRed=Ferro, Blue=Para")
+    plt.title(f"Phase Diagram (Vegas High-Precision)\nRed=Ferro, Blue=Para")
 
     plt.savefig(f"PhaseDiagram_{filename_base}.png", dpi=300)
     print("Done.")
-
 
 if __name__ == "__main__":
     main()
