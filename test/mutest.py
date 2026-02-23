@@ -65,78 +65,153 @@ def compute_free_energy(tp, mu, n_grid=200):
     energy = integrate_2d_simpson(eps * f, kx, ky) / (2 * np.pi) ** 2
     return energy
 
-# 将这段代码追加到你上面的代码之后
 
-def run_convergence_test(target_density=0.01, tp=0.2, grid_sizes=None):
-    if grid_sizes is None:
-        # 从粗网格到极细网格
-        grid_sizes = [100, 200, 400, 800, 1200, 1600]
-        
-    print(f"--- 开始收敛性测试 ---")
-    print(f"目标密度: {target_density}, tp: {tp}, 温度平滑: {T_SMEARING}")
-    print(f"{'N_grid':>6} | {'mu':>10} | {'Energy':>12} | {'DOS Error':>10} | {'Time (s)':>8}")
-    print("-" * 60)
-
-    mu_list = []
-    energy_list = []
-    dos_error_list = []
-    times = []
-
-    # 解析极限 (仅在低密度、且 tp 使得带底仍在 (0,0) 点时准确)
-    min_eps = -4 * t - 4 * tp
-    theoretical_dos = 1.0 / (4 * np.pi * (t + 2 * tp))
-
-    for n in grid_sizes:
-        start_time = time.time()
-        
-        # 1. 计算化学势
-        mu = compute_chemical_potential(target_density, tp, n_grid=n)
-        
-        # 2. 计算能量
-        energy = compute_free_energy(tp, mu, n_grid=n)
-        
-        # 3. 对比解析态密度
-        calculated_dos = target_density / (mu - min_eps)
-        dos_error = abs(theoretical_dos - calculated_dos) / theoretical_dos
-        
-        end_time = time.time()
-        
-        mu_list.append(mu)
-        energy_list.append(energy)
-        dos_error_list.append(dos_error)
-        times.append(end_time - start_time)
-        
-        print(f"{n:6d} | {mu:10.6f} | {energy:12.8f} | {dos_error:9.2%} | {times[-1]:8.2f}")
-
-    # ================= 绘图部分 =================
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+def compute_interaction_energy_vegas(tp, mu_up, mu_down, n_p=100, nitn=10, neval=50000):
+ 
+    p_vec = np.linspace(-np.pi, np.pi, n_p)
+    dp = p_vec[1] - p_vec[0]
+    PX, PY = np.meshgrid(p_vec, p_vec)
     
-    # 图1: 化学势的收敛
-    axes[0].plot(grid_sizes, mu_list, marker='o', color='b')
-    axes[0].set_title("Convergence of $\mu$")
-    axes[0].set_xlabel("$N_{grid}$")
-    axes[0].set_ylabel("Chemical Potential $\mu$")
-    axes[0].grid(True, linestyle='--', alpha=0.6)
+    eps_p = epsilon_k_continuous(PX, PY, tp)
+    f_p_up = fermi_smooth(eps_p, mu_up)
+    
+    @vegas.batchintegrand
+    def integrand(x):
+        # x 形状为 (N, 4)，代表 N 个采样点，每个点是 (qx, qy, kx, ky)
+        qx, qy = x[:, 0], x[:, 1]
+        kx, ky = x[:, 2], x[:, 3]
+        
+        # 计算外层分子 f_up(k) * f_down(q-k)
+        eps_k = epsilon_k_continuous(kx, ky, tp)
+        f_k_up = fermi_smooth(eps_k, mu_up)
+        
+        # 注意：由于 epsilon_k_continuous 是 cos 的组合，具有天然周期性，所以无需做取模操作
+        eps_kprime = epsilon_k_continuous(qx - kx, qy - ky, tp)
+        f_kprime_down = fermi_smooth(eps_kprime, mu_down)
+        
+        numerator = f_k_up * f_kprime_down
+        
+        # 初始化结果数组
+        res = np.zeros_like(numerator)
+        
+        # ★ 核心优化：掩码过滤。只有分子明显大于 0 的有效点，才去计算极其昂贵的内层 P 积分
+        mask = numerator > 1e-10
+        
+        if not np.any(mask):
+            return res  # 如果这批点全在费米面外，直接返回全 0
+            
+        # 提取出落在费米面上的有效点
+        qx_v, qy_v = qx[mask], qy[mask]
+        eps_k_v, eps_kprime_v = eps_k[mask], eps_kprime[mask]
+        
+        omega_v = eps_k_v + eps_kprime_v  # 形状: (N_valid, )
 
-    # 图2: 能量的收敛
-    axes[1].plot(grid_sizes, energy_list, marker='s', color='r')
-    axes[1].set_title("Convergence of Free Energy")
-    axes[1].set_xlabel("$N_{grid}$")
-    axes[1].set_ylabel("Free Energy")
-    axes[1].grid(True, linestyle='--', alpha=0.6)
+        PX_prime = qx_v[:, np.newaxis, np.newaxis] - PX[np.newaxis, :, :]
+        PY_prime = qy_v[:, np.newaxis, np.newaxis] - PY[np.newaxis, :, :]
+        
+        eps_p_prime = epsilon_k_continuous(PX_prime, PY_prime, tp)
+        f_pprime_down = fermi_smooth(eps_p_prime, mu_down)
+        
+        num_p = (1.0 - f_p_up[np.newaxis, :, :]) * (1.0 - f_pprime_down)
+        denom_p_sum = eps_p[np.newaxis, :, :] + eps_p_prime
+        
+        D = denom_p_sum - omega_v[:, np.newaxis, np.newaxis]
+        kernel = D / (D**2 + BROADENING**2)
+        
+        chi_int = np.sum(num_p * kernel, axis=(1, 2)) * (dp**2) / (2 * np.pi)**2
+        
+        denominator_v = 1.0 + U * chi_int
+        
+        res[mask] = numerator[mask] / denominator_v
+    
+        return res / (2 * np.pi)**4
 
-    # 图3: DOS误差的收敛 (对数坐标)
-    axes[2].plot(grid_sizes, dos_error_list, marker='^', color='g')
-    axes[2].set_yscale('log')
-    axes[2].set_title("Error vs Analytical DOS")
-    axes[2].set_xlabel("$N_{grid}$")
-    axes[2].set_ylabel("Relative Error (Log Scale)")
-    axes[2].grid(True, linestyle='--', alpha=0.6)
+    integ = vegas.Integrator([[-np.pi, np.pi]] * 4)
 
-    plt.tight_layout()
-    plt.savefig('convergence_test_results.png', dpi=300)
-    print(f"\n测试完成！收敛趋势图已保存为 'convergence_test_results.png'")
+    integ(integrand, nitn=5, neval=neval // 2)
+    
+    result = integ(integrand, nitn=nitn, neval=neval)
+    
+    return result.mean  # result 包含了均值(mean)和统计误差(sdev)
 
-# 运行测试 (假设目标密度非常低，比如 0.005)
-if __name__ == '__main__':
-    run_convergence_test(target_density=0.005, tp=1)
+
+def solve_phase_point_deltaE(args):
+    tp_over_t, density, n_grid_mu = args
+    tp =  tp_over_t * t
+
+    if density <= 1e-5:
+        return 0.0
+
+    try:
+        mu_para = compute_chemical_potential(density / 2.0, tp, n_grid=n_grid_mu)
+        E_free_para = 2.0 * compute_free_energy(tp, mu_para, n_grid=n_grid_mu)
+
+        E_int_para = compute_interaction_energy_vectorized(tp, mu_para, mu_para, n_q=48, n_k=48)
+
+        E_total_para = E_free_para + U * E_int_para
+
+        mu_ferro = compute_chemical_potential(density, tp, n_grid=n_grid_mu)
+        E_free_ferro = compute_free_energy(tp, mu_ferro, n_grid=n_grid_mu)
+        E_total_ferro = E_free_ferro
+
+        return E_total_para - E_total_ferro
+
+    except Exception as e:
+        return 0.0
+
+
+def main():
+    tp_vals = np.linspace(-0.45, -0.55, 10)
+    dens_vals = np.linspace(0.01, 0.05, 10)
+
+    n_grid_mu = 2000
+
+    tasks = [(tp, dens, n_grid_mu) for tp in tp_vals for dens in dens_vals]
+
+    try:
+        n_cores = int(os.environ['SLURM_CPUS_PER_TASK'])
+    except:
+        n_cores = mp.cpu_count()
+
+    print(f"=== Hubbard Phase Diagram (Vectorized & Exact Omega) ===")
+    print(f"Cores: {n_cores}")
+    print(f"Grid: {len(tp_vals)}x{len(dens_vals)} = {len(tasks)} points")
+    print(f"Integration Mesh: n_q=24, n_k=24 (Vectorized)")
+    print(f"Physics: U={U / t}t, Broadening={BROADENING}, T_smear={T_SMEARING}")
+
+    start_time = time.time()
+
+    with mp.Pool(n_cores) as pool:
+        results = list(tqdm(pool.imap(solve_phase_point_deltaE, tasks, chunksize=1), total=len(tasks)))
+
+    elapsed = (time.time() - start_time) / 60
+    print(f"Calculation finished in {elapsed:.2f} minutes.")
+
+    delta_E_grid = np.array(results).reshape(len(tp_vals), len(dens_vals))
+
+    filename_base = f"two_U{U:.1f}_tp{tp_vals[0]:.1f}_{tp_vals[-1]:.1f}"
+    np.savez(f"results_{filename_base}.npz", tp=tp_vals, dens=dens_vals, delta_E=delta_E_grid)
+
+    plt.figure(figsize=(10, 8))
+    X, Y = np.meshgrid(dens_vals, tp_vals)
+
+    limit = np.max(np.abs(delta_E_grid)) * 0.8
+    if limit == 0: limit = 0.1
+    norm = mcolors.TwoSlopeNorm(vmin=-limit, vcenter=0, vmax=limit)
+
+    cf = plt.contourf(X, Y, delta_E_grid, levels=100, cmap='RdBu_r', norm=norm, extend='both')
+    cbar = plt.colorbar(cf)
+    cbar.set_label(r'$\Delta E = E_{para} - E_{ferro}$')
+
+    plt.contour(X, Y, delta_E_grid, levels=[0], colors='black', linewidths=2)
+
+    plt.xlabel("Density n")
+    plt.ylabel("t'/t")
+    plt.title(f"Phase Diagram (Vectorized High-Precision)\nRed=Ferro, Blue=Para")
+
+    plt.savefig(f"PhaseDiagram_{filename_base}.png", dpi=300)
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()
