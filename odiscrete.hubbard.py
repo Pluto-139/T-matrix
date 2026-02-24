@@ -36,7 +36,7 @@ def compute_phase_point(args):
     ky_val = ky_idx * 2 * np.pi / L - np.pi
     
   
-    eps = -2 * t * (np.cos(kx) + np.cos(ky)) - 2* tp * np.cos(kx + ky)
+    eps = -2 * t * (np.cos(kx_val) + np.cos(ky_val)) - 2* t_prime * np.cos(kx_val + ky_val)
     
 
     sorted_order = np.argsort(eps)
