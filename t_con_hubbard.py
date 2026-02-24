@@ -1,5 +1,4 @@
 import matplotlib
-
 matplotlib.use('Agg')
 
 import numpy as np
@@ -14,29 +13,29 @@ from tqdm import tqdm
 
 t = 1.0
 U = 4.0 * t
-BROADENING = 0.05 * t
-T_SMEARING = 0.005 * t
-
+T_SMEARING = 0.003 * t  # 真实的物理温度，模拟 T->0，完全移除人工 Broadening
 
 def epsilon_k_continuous(kx, ky, tp):
+    # 连续的色散关系
     return -2 * t * (np.cos(kx) + np.cos(ky)) - 4 * tp * np.cos(kx) * np.cos(ky)
-     #return -2 * t * (np.cos(kx) + np.cos(ky)) - 2* tp * np.cos(kx + ky)
 
 def fermi_smooth(energies, mu):
+    # 物理的费米-狄拉克分布
     val = (energies - mu) / T_SMEARING
     val = np.clip(val, -100, 100)
     return 1.0 / (np.exp(val) + 1.0)
 
-
 def integrate_2d_simpson(f_val, x_grid, y_grid):
-    return simpson(simpson(f_val, x=x_grid, axis=-1), x=y_grid, axis=-1)
-
+    # 对最后两个维度进行 2D Simpson 积分 (适用于 broadcasting 后的多维数组)
+    res_y = simpson(f_val, x=y_grid, axis=-1)
+    res_x = simpson(res_y, x=x_grid, axis=-1)
+    return res_x
 
 def compute_chemical_potential(target_density, tp, n_grid=200):
     kx = np.linspace(-np.pi, np.pi, n_grid)
     ky = np.linspace(-np.pi, np.pi, n_grid)
     KX, KY = np.meshgrid(kx, ky)
-
+    
     eps = epsilon_k_continuous(KX, KY, tp)
     norm = (2 * np.pi) ** 2
 
@@ -53,158 +52,119 @@ def compute_chemical_potential(target_density, tp, n_grid=200):
     except ValueError:
         return mu_min if density_diff(mu_min) > 0 else mu_max
 
-
 def compute_free_energy(tp, mu, n_grid=200):
     kx = np.linspace(-np.pi, np.pi, n_grid)
     ky = np.linspace(-np.pi, np.pi, n_grid)
     KX, KY = np.meshgrid(kx, ky)
-
+    
     eps = epsilon_k_continuous(KX, KY, tp)
     f = fermi_smooth(eps, mu)
-
+    
     energy = integrate_2d_simpson(eps * f, kx, ky) / (2 * np.pi) ** 2
     return energy
 
-
-def compute_interaction_energy_vectorized(tp, mu_up, mu_down, n_q=50, n_k=48):
-    q_vec = np.linspace(-np.pi, np.pi, n_q)
-    QX, QY = np.meshgrid(q_vec, q_vec, indexing='ij')
-
-    k_vec = np.linspace(-np.pi, np.pi, n_k)
-    KX, KY = np.meshgrid(k_vec, k_vec)
-
-    p_vec = k_vec
-    PX, PY = KX, KY
-
-    eps_k = epsilon_k_continuous(KX, KY, tp)
-    f_k_up = fermi_smooth(eps_k, mu_up)
-
-  
-    eps_p = epsilon_k_continuous(PX, PY, tp)
-    f_p_up = fermi_smooth(eps_p, mu_up)
-
-    FERMI_THRESH = 1e-3
-    k_mask = f_k_up > FERMI_THRESH  
-
-   
-    p_hole_mask = (1.0 - f_p_up) > FERMI_THRESH 
-
-    n_k_active = np.sum(k_mask)
-    n_p_active = np.sum(p_hole_mask)
-    print(f"  [Mask] Active k points: {n_k_active}/{n_k**2} ({100*n_k_active/n_k**2:.1f}%)")
-    print(f"  [Mask] Active p points: {n_p_active}/{n_k**2} ({100*n_p_active/n_k**2:.1f}%)")
-
-    integrand_Q_values = np.zeros((n_q, n_q))
-
-    for i in range(n_q):
-        for j in range(n_q):
-            Qx_val = QX[i, j]
-            Qy_val = QY[i, j]
-
-            KX_prime = (Qx_val - KX + np.pi) % (2 * np.pi) - np.pi
-            KY_prime = (Qy_val - KY + np.pi) % (2 * np.pi) - np.pi
-            eps_kprime = epsilon_k_continuous(KX_prime, KY_prime, tp)
-            f_kprime_down = fermi_smooth(eps_kprime, mu_down)
-
-     
-            numerator_grid = f_k_up * f_kprime_down
-
- 
-            if np.max(numerator_grid) < FERMI_THRESH ** 2:
-                integrand_Q_values[i, j] = 0.0
-                continue
-            PX_prime = (Qx_val - PX + np.pi) % (2 * np.pi) - np.pi
-            PY_prime = (Qy_val - PY + np.pi) % (2 * np.pi) - np.pi
-
-            eps_p_prime = epsilon_k_continuous(PX_prime, PY_prime, tp)
-            f_p_prime_down = fermi_smooth(eps_p_prime, mu_down)
-
-            hole_up   = 1.0 - f_p_up
-            hole_down = 1.0 - f_p_prime_down
-            num_p = hole_up * hole_down
-
- 
-            combined_p_mask = (hole_up > FERMI_THRESH) & (hole_down > FERMI_THRESH)
-            num_p_masked = np.where(combined_p_mask, num_p, 0.0)
-
-          
-            if np.max(num_p_masked) < FERMI_THRESH ** 2:
-      
-                final_integrand = numerator_grid
-                res_Q = integrate_2d_simpson(final_integrand, k_vec, k_vec) / (2 * np.pi) ** 2
-                integrand_Q_values[i, j] = res_Q
-                continue
-
-          
-            omega_grid = eps_k + eps_kprime
-            denom_p_sum = eps_p + eps_p_prime
-
-            omega_4d = omega_grid[:, :, np.newaxis, np.newaxis]
-            denom_4d = denom_p_sum[np.newaxis, np.newaxis, :, :]
-            num_4d   = num_p_masked[np.newaxis, np.newaxis, :, :]  # ← 用掩码版本
-
-            D = denom_4d - omega_4d
-            kernel = D / (D ** 2 + BROADENING ** 2)
-
-            integrand_chi = num_4d * kernel
-
-            chi_int_y = simpson(integrand_chi, x=p_vec, axis=-1)
-            chi_grid  = simpson(chi_int_y,     x=p_vec, axis=-1)
-            chi_grid /= (2 * np.pi) ** 2
-
-            denominator_grid = 1.0 + U * chi_grid
-            final_integrand  = numerator_grid / denominator_grid
-
-            res_Q = integrate_2d_simpson(final_integrand, k_vec, k_vec) / (2 * np.pi) ** 2
-            integrand_Q_values[i, j] = res_Q
-
-    total_energy = integrate_2d_simpson(integrand_Q_values, q_vec, q_vec) / (2 * np.pi) ** 2
-    return total_energy
-
-
 def solve_phase_point_deltaE(args):
-    tp_over_t, density, n_grid_mu = args
-    tp =  tp_over_t * t
+    tp_over_t, density, N_grid = args
+    tp = tp_over_t * t
 
     if density <= 1e-5:
         return 0.0
 
     try:
-        mu_para = compute_chemical_potential(density / 2.0, tp, n_grid=n_grid_mu)
-        E_free_para = 2.0 * compute_free_energy(tp, mu_para, n_grid=n_grid_mu)
+        # --- 1. 计算化学势与无相互作用的动能 ---
+        mu_para = compute_chemical_potential(density / 2.0, tp)
+        mu_ferro = compute_chemical_potential(density, tp)
 
-        E_int_para = compute_interaction_energy_vectorized(tp, mu_para, mu_para, n_q=48, n_k=48)
+        E_kin_para = 2.0 * compute_free_energy(tp, mu_para)
+        E_total_ferro = compute_free_energy(tp, mu_ferro) # 铁磁态因同向自旋排斥相互作用为0
 
-        E_total_para = E_free_para + U * E_int_para
+        # --- 2. 准备动量网格 ---
+        # Simpson 积分更喜欢奇数个点 (偶数个区间)
+        kx_1d = np.linspace(-np.pi, np.pi, N_grid)
+        ky_1d = np.linspace(-np.pi, np.pi, N_grid)
+        KX, KY = np.meshgrid(kx_1d, ky_1d, indexing='ij')
 
-        mu_ferro = compute_chemical_potential(density, tp, n_grid=n_grid_mu)
-        E_free_ferro = compute_free_energy(tp, mu_ferro, n_grid=n_grid_mu)
-        E_total_ferro = E_free_ferro
+        eps = epsilon_k_continuous(KX, KY, tp)
+        eps_tilde = eps - mu_para
+        f_p = fermi_smooth(eps_tilde, 0.0)
+
+        # --- 3. 准备虚频网格 (利用 x = atan(w/Gamma) 将 [0, inf) 映射到 [0, pi/2) ) ---
+        N_omega = 60
+        Gamma = 4.0 * t
+        x_grid = np.linspace(0, np.pi/2 - 1e-6, N_omega)
+        omega = Gamma * np.tan(x_grid)
+        d_omega_dx = Gamma / (np.cos(x_grid)**2)
+        omega_3d = omega[np.newaxis, np.newaxis, :]  # 形状: (1, 1, N_omega)
+
+        integrand_q = np.zeros((N_grid, N_grid))
+
+        # --- 4. 计算 Equation (4) 中的双重积分 ---
+        for i in range(N_grid):
+            for j in range(N_grid):
+                qx = kx_1d[i]
+                qy = ky_1d[j]
+
+                # cos(q-p) 是周期函数，直接减即可，无需取模
+                eps_minus_p_q = epsilon_k_continuous(qx - KX, qy - KY, tp) - mu_para
+                f_minus_p_q = fermi_smooth(eps_minus_p_q, 0.0)
+
+                # 提取化简后的有效能量项和分子项
+                E_p = eps_tilde + eps_minus_p_q
+                N_p = 1.0 - f_p - f_minus_p_q
+
+                E_p_3d = E_p[:, :, np.newaxis]
+                N_p_3d = N_p[:, :, np.newaxis]
+
+                # 计算复数分母的绝对值平方 (添加 1e-12 防止在 E=0 且 w=0 处的 0/0 警告)
+                denom = E_p_3d**2 + omega_3d**2
+                denom = np.where(denom < 1e-12, 1e-12, denom)
+
+                # 计算实部 chi_1 和虚部 chi_2 的被积函数
+                chi1_integrand = (E_p_3d * N_p_3d) / denom
+                chi2_integrand = (omega_3d * N_p_3d) / denom
+
+                # 并行对 p 积分得到对于每个 omega 的 chi_1 和 chi_2 (形状: N_omega)
+                chi1 = integrate_2d_simpson(chi1_integrand, kx_1d, ky_1d) / (2*np.pi)**2
+                chi2 = integrate_2d_simpson(chi2_integrand, kx_1d, ky_1d) / (2*np.pi)**2
+
+                # Equation 4 的 ln 积分核
+                log_term = np.log((1.0 + U * chi1)**2 + (U * chi2)**2)
+
+                # 沿着 x (即映射后的虚频 omega) 积分
+                integral_omega = simpson(log_term * d_omega_dx, x=x_grid) / (2*np.pi)
+                integrand_q[i, j] = integral_omega
+
+        # 沿着 q 积分
+        integral_q = integrate_2d_simpson(integrand_q, kx_1d, ky_1d) / (2*np.pi)**2
+
+        # 组合 Eq (4) 最终的基态能量
+        E_total_para = E_kin_para - (U / 2.0) * (1.0 - density) + integral_q
 
         return E_total_para - E_total_ferro
 
     except Exception as e:
+        print(f"Error at tp={tp_over_t}, n={density}: {e}")
         return 0.0
-
 
 def main():
     tp_vals = np.linspace(-0.45, -0.55, 10)
     dens_vals = np.linspace(0.01, 0.05, 10)
+    
+    # 极度平滑的方程，只需要 37x37 就能达到极高的 Simpson 精度！
+    N_grid = 37 
 
-    n_grid_mu = 2000
-
-    tasks = [(tp, dens, n_grid_mu) for tp in tp_vals for dens in dens_vals]
+    tasks = [(tp, dens, N_grid) for tp in tp_vals for dens in dens_vals]
 
     try:
         n_cores = int(os.environ['SLURM_CPUS_PER_TASK'])
     except:
         n_cores = mp.cpu_count()
 
-    print(f"=== Hubbard Phase Diagram (Vectorized & Exact Omega) ===")
+    print(f"=== Hubbard Phase Diagram (Eq. 4 Matsubara Integration) ===")
     print(f"Cores: {n_cores}")
     print(f"Grid: {len(tp_vals)}x{len(dens_vals)} = {len(tasks)} points")
-    print(f"Integration Mesh: n_q=24, n_k=24 (Vectorized)")
-    print(f"Physics: U={U / t}t, Broadening={BROADENING}, T_smear={T_SMEARING}")
+    print(f"Integration Mesh: N_q={N_grid}, N_k={N_grid}, N_w=60")
+    print(f"Physics: U={U / t}t, T_smear={T_SMEARING}t (Strictly No Artificial Broadening)")
 
     start_time = time.time()
 
@@ -216,7 +176,7 @@ def main():
 
     delta_E_grid = np.array(results).reshape(len(tp_vals), len(dens_vals))
 
-    filename_base = f"two_U{U:.1f}_tp{tp_vals[0]:.1f}_{tp_vals[-1]:.1f}"
+    filename_base = f"Eq4_U{U:.1f}_tp{tp_vals[0]:.1f}_{tp_vals[-1]:.1f}"
     np.savez(f"results_{filename_base}.npz", tp=tp_vals, dens=dens_vals, delta_E=delta_E_grid)
 
     plt.figure(figsize=(10, 8))
@@ -234,11 +194,10 @@ def main():
 
     plt.xlabel("Density n")
     plt.ylabel("t'/t")
-    plt.title(f"Phase Diagram (Vectorized High-Precision)\nRed=Ferro, Blue=Para")
+    plt.title(f"Phase Diagram (Eq 4: Virtual Hole Excitation Included)\nRed=Ferro, Blue=Para")
 
     plt.savefig(f"PhaseDiagram_{filename_base}.png", dpi=300)
     print("Done.")
-
 
 if __name__ == "__main__":
     main()
