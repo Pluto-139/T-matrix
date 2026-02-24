@@ -10,7 +10,7 @@ import matplotlib.patches as mpatches
 import os
 from tqdm import tqdm
 t = 1.0
-U = 4.0 * t
+U = 9.0 * t
 L = 32
 Omega = L * L    
 
@@ -170,7 +170,7 @@ def plot_phase_diagram(data, rho_range, tp_range, filename_prefix):
     plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
     plt.close()
     
-    print(f"Phase diagram saved as '{plot_filename}' and '{pdf_filename}'")
+    print(f"Phase diagram saved as '{plot_filename}'")
     
     return plot_filename
 
@@ -208,7 +208,7 @@ if __name__ == '__main__':
     
     results_array = np.array(results)
     
-    filename_prefix = f"phase_U4_tp{tp_min:.2f}-{tp_max:.2f}_n{rho_min:.2f}-{rho_max:.2f}"
+    filename_prefix = f"phase_U{U:.2f}_tp{tp_min:.2f}-{tp_max:.2f}_n{rho_min:.2f}-{rho_max:.2f}"
     data_filename = f"{filename_prefix}_data.dat"
     
     np.savetxt(data_filename, results_array, fmt="%.6f", 
