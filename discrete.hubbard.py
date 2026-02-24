@@ -135,9 +135,80 @@ def compute_phase_point(args):
     is_fm = 1 if E_fm < E_pm else 0
     
     return rho, t_prime, E_fm, E_pm, is_fm
+    
+def plot_phase_diagram(data, rho_range, tp_range, filename_prefix):
+    """
+    绘制相图
+    """
+    rho = data[:, 0]
+    t_prime = data[:, 1]
+    is_fm = data[:, 4]
+    
+    # 创建网格用于插值和绘图
+    rho_grid, tp_grid = np.meshgrid(
+        np.linspace(rho.min(), rho.max(), 200),
+        np.linspace(t_prime.min(), t_prime.max(), 200)
+    )
+    
+    # 将离散数据插值到网格上
+    points = np.column_stack((rho, t_prime))
+    phase_grid = griddata(points, is_fm, (rho_grid, tp_grid), method='linear')
+    
+    # 平滑处理以获得清晰的边界
+    phase_grid_smooth = gaussian_filter(phase_grid, sigma=1.0)
+    phase_grid_binary = (phase_grid_smooth > 0.5).astype(float)
+    
+    # 创建图形
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    # 设置颜色映射：顺磁态为白色，铁磁态为灰色
+    cmap = ListedColormap(['white', 'lightgray'])
+    
+    # 绘制相图
+    im = ax.pcolormesh(rho_grid, tp_grid, phase_grid_binary, 
+                       cmap=cmap, shading='auto', alpha=0.8)
+    
+    # 使用contour找到边界线
+    contours = ax.contour(rho_grid, tp_grid, phase_grid_smooth, 
+                          levels=[0.5], colors='black', linewidths=2, alpha=0.8)
+    
+    # 设置坐标轴标签
+    ax.set_xlabel(r'Electron density $n$', fontsize=14)
+    ax.set_ylabel(r'$t^{\prime}/t$', fontsize=14)
+    
+    # 设置坐标轴范围
+    ax.set_xlim(rho.min(), rho.max())
+    ax.set_ylim(t_prime.min(), t_prime.max())
+    
+    # 添加图例
+    fm_patch = mpatches.Patch(color='lightgray', label='Ferromagnetic (FM)')
+    pm_patch = mpatches.Patch(color='white', label='Paramagnetic (PM)')
+    ax.legend(handles=[fm_patch, pm_patch], loc='upper right', fontsize=12)
+    
+    # 添加标题
+    ax.set_title(f'Phase diagram for U = 4t\n'
+                 f'$t^{{\prime}}/t$: [{tp_range[0]:.2f}, {tp_range[1]:.2f}], '
+                 f'n: [{rho_range[0]:.2f}, {rho_range[1]:.2f}]', 
+                 fontsize=14)
+    
+    # 添加网格线
+    ax.grid(True, linestyle='--', alpha=0.3)
+    
+    # 调整布局
+    plt.tight_layout()
+    
+    # 保存图片
+    plot_filename = f"{filename_prefix}_phase.png"
+    pdf_filename = f"{filename_prefix}_phase.pdf"
+    plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+    plt.savefig(pdf_filename, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Phase diagram saved as '{plot_filename}' and '{pdf_filename}'")
+    
+    return plot_filename
 
 if __name__ == '__main__':
-    # 扫描文献 Fig 1 中的相图范围 [cite: 81-85]
     rho_vals = np.linspace(0.01, 0.75, 40)
     t_prime_vals = np.linspace(0.40, 0.50, 40)
     
@@ -145,21 +216,34 @@ if __name__ == '__main__':
     tasks = [(r, tp) for tp in t_prime_vals for r in rho_vals]
     
     print(f"Total points to compute: {len(tasks)}")
+    print(f"Parameter range: n ∈ [{rho_min:.2f}, {rho_max:.2f}], "
+          f"t'/t ∈ [{tp_min:.2f}, {tp_max:.2f}]")
     start_time = time.time()
     
-    # 这里定义进程池，使用集群节点上几乎所有的核心
-    # 请根据你通过 SLURM 申请的核心数 (如 -c 32) 调整这里的 processes 数量
-    num_cores = 32  
+    # 定义进程池，使用集群节点上几乎所有的核心
+    num_cores = 56  
     
     with Pool(processes=num_cores) as pool:
-        # map() 会自动将 tasks 分发给各个 CPU 核心
         results = pool.map(compute_phase_point, tasks)
     
     end_time = time.time()
-    print(f"Computation completed in {(end_time - start_time)/60:.2f} minutes.")
+    computation_time = (end_time - start_time) / 60
+    print(f"Computation completed in {computation_time:.2f} minutes.")
     
-    # 保存数据为文本文件，用于后续绘图
-    # 格式: rho, t'/t, E_fm, E_pm, phase(1=FM, 0=PM)
-    np.savetxt("phase_diagram_U4.dat", results, fmt="%.6f", 
+    # 将结果转换为numpy数组
+    results_array = np.array(results)
+    
+    # 生成带参数区间的文件名
+    filename_prefix = f"phase_U4_tp{tp_min:.2f}-{tp_max:.2f}_n{rho_min:.2f}-{rho_max:.2f}"
+    data_filename = f"{filename_prefix}_data.dat"
+    
+    # 保存数据为文本文件
+    np.savetxt(data_filename, results_array, fmt="%.6f", 
                header="rho t_prime E_fm E_pm is_fm")
-    print("Data saved to phase_diagram_U4.dat")
+    print(f"Data saved to {data_filename}")
+    
+    # 绘制相图
+    plot_filename = plot_phase_diagram(results_array, 
+                                      (rho_min, rho_max), 
+                                      (tp_min, tp_max), 
+                                      filename_prefix)
