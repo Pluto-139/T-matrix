@@ -102,14 +102,11 @@ def compute_phase_point(args):
             
             denom = eps_p_valid + eps_minus_p_q_valid - omega
 
-            denom[denom < 1e-12] = 1e-12 
-            
+            denom[denom < 1e-12] = 1e-12    
 
             chi_pp = np.sum(1.0 / denom) / Omega
             
-
             interaction_sum += 1.0 / (1.0 + U * chi_pp)
-
 
     E_pm_int = (U / (Omega * Omega)) * interaction_sum
     E_pm = E_pm_kin + E_pm_int
@@ -158,27 +155,19 @@ def plot_phase_diagram(data, rho_range, tp_range, filename_prefix):
     ax.set_xlim(rho.min(), rho.max())
     ax.set_ylim(t_prime.min(), t_prime.max())
     
-
     fm_patch = mpatches.Patch(color='lightgray', label='Ferromagnetic (FM)')
     pm_patch = mpatches.Patch(color='white', label='Paramagnetic (PM)')
     ax.legend(handles=[fm_patch, pm_patch], loc='upper right', fontsize=12)
-
+    
     ax.set_title(f'Phase diagram for U = 4t\n'
                  f'$t^{{\prime}}/t$: [{tp_range[0]:.2f}, {tp_range[1]:.2f}], '
                  f'n: [{rho_range[0]:.2f}, {rho_range[1]:.2f}]', 
                  fontsize=14)
     
-
     ax.grid(True, linestyle='--', alpha=0.3)
-    
-    # 调整布局
     plt.tight_layout()
-    
-    # 保存图片
     plot_filename = f"{filename_prefix}_phase.png"
-    pdf_filename = f"{filename_prefix}_phase.pdf"
     plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
-    plt.savefig(pdf_filename, bbox_inches='tight')
     plt.close()
     
     print(f"Phase diagram saved as '{plot_filename}' and '{pdf_filename}'")
