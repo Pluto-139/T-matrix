@@ -1,201 +1,244 @@
+import matplotlib
+
+matplotlib.use('Agg')
+
 import numpy as np
-import time
-import multiprocessing as mp
-from multiprocessing import Pool
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
-from scipy.interpolate import griddata
-from scipy.ndimage import gaussian_filter
-import matplotlib.patches as mpatches
-from scipy.optimize import brentq
+import matplotlib.colors as mcolors
+import multiprocessing as mp
+import time
 import os
+from scipy.integrate import simpson
+from scipy.optimize import brentq
 from tqdm import tqdm
-from numba import njit
 
-# --- 物理参数设置 ---
-t_hop = 1.0
-U_int = 4.0 * t_hop
-T_smear = 0.05 * t_hop  # 有限温度展宽 (Smearing)
+t = 1.0
+U = 4.0 * t
+BROADENING = 0.05 * t
+T_SMEARING = 0.005 * t
 
-# --- 积分节点设置 (Gauss-Legendre) ---
-# N_quad 决定了热力学极限的逼近精度，集群运行建议 48 或更高
-N_quad = 48 
-nodes, weights = np.polynomial.legendre.leggauss(N_quad)
-nodes_pi = nodes * np.pi
-weights_pi = weights * np.pi / (2 * np.pi) 
 
-# --- Numba 高速计算核心 (公式保持严格不变) ---
+def epsilon_k_continuous(kx, ky, tp):
+    return -2 * t * (np.cos(kx) + np.cos(ky)) - 4 * tp * np.cos(kx) * np.cos(ky)
+     #return -2 * t * (np.cos(kx) + np.cos(ky)) - 2* tp * np.cos(kx + ky)
 
-@njit(fastmath=True)
-def dispersion(kx, ky, tp):
-    return -2.0 * t_hop * (np.cos(kx) + np.cos(ky)) - 4.0 * tp * np.cos(kx) * np.cos(ky)
+def fermi_smooth(energies, mu):
+    val = (energies - mu) / T_SMEARING
+    val = np.clip(val, -100, 100)
+    return 1.0 / (np.exp(val) + 1.0)
 
-@njit(fastmath=True)
-def fermi_dirac(eps, mu):
-    x = (eps - mu) / T_smear
-    if x > 50: return 0.0
-    if x < -50: return 1.0
-    return 1.0 / (np.exp(x) + 1.0)
 
-@njit(fastmath=True)
-def compute_chi_pp_core(qx, qy, omega, mu, tp, nodes, weights):
-    """严格按照 chi_pp 积分公式计算"""
-    chi = 0.0
-    for i in range(N_quad):
-        px = nodes[i]
-        for j in range(N_quad):
-            py = nodes[j]
-            eps_p = dispersion(px, py, tp)
-            eps_minus_p_q = dispersion(qx - px, qy - py, tp)
-            
-            f_up = fermi_dirac(eps_p, mu)
-            f_down = fermi_dirac(eps_minus_p_q, mu)
-            
-            numerator = (1.0 - f_up) * (1.0 - f_down)
-            denom = eps_p + eps_minus_p_q - omega
-            if abs(denom) < 1e-10: denom = 1e-10
-            chi += (weights[i] * weights[j]) * (numerator / denom)
-    return chi
+def integrate_2d_simpson(f_val, x_grid, y_grid):
+    return simpson(simpson(f_val, x=x_grid, axis=-1), x=y_grid, axis=-1)
 
-@njit(fastmath=True)
-def compute_total_energy_pm(mu, tp, U, nodes, weights):
-    """PM 总能量积分: E_kin + E_int"""
-    E_kin = 0.0
-    for i in range(N_quad):
-        for j in range(N_quad):
-            kx, ky = nodes[i], nodes[j]
-            eps_k = dispersion(kx, ky, tp)
-            E_kin += 2.0 * (weights[i] * weights[j]) * fermi_dirac(eps_k, mu) * eps_k
 
-    E_int_sum = 0.0
-    for i1 in range(N_quad):
-        for j1 in range(N_quad):
-            kx, ky = nodes[i1], nodes[j1]
-            f_k = fermi_dirac(dispersion(kx, ky, tp), mu)
-            if f_k < 1e-7: continue
-            for i2 in range(N_quad):
-                for j2 in range(N_quad):
-                    kpx, kpy = nodes[i2], nodes[j2]
-                    f_kp = fermi_dirac(dispersion(kpx, kpy, tp), mu)
-                    if f_kp < 1e-7: continue
-                    
-                    qx, qy = kx + kpx, ky + kpy
-                    omega = dispersion(kx, ky, tp) + dispersion(kpx, kpy, tp)
-                    chi = compute_chi_pp_core(qx, qy, omega, mu, tp, nodes, weights)
-                    E_int_sum += (weights[i1]*weights[j1]*weights[i2]*weights[j2]) * (f_k * f_kp) / (1.0 + U * chi)
-                    
-    return E_kin + U * E_int_sum
+def compute_chemical_potential(target_density, tp, n_grid=200):
+    kx = np.linspace(-np.pi, np.pi, n_grid)
+    ky = np.linspace(-np.pi, np.pi, n_grid)
+    KX, KY = np.meshgrid(kx, ky)
 
-# --- 化学势求解 ---
-def get_mu(rho, tp, spin_deg):
-    @njit
-    def calc_n(mu_guess):
-        n = 0.0
-        for i in range(N_quad):
-            for j in range(N_quad):
-                eps = dispersion(nodes_pi[i], nodes_pi[j], tp)
-                n += (weights_pi[i] * weights_pi[j]) * fermi_dirac(eps, mu_guess)
-        return n * spin_deg
-    return brentq(lambda m: calc_n(m) - rho, -8.0, 8.0)
+    eps = epsilon_k_continuous(KX, KY, tp)
+    norm = (2 * np.pi) ** 2
 
-def compute_phase_point(args):
-    rho, tp = args
+    def density_diff(mu):
+        f = fermi_smooth(eps, mu)
+        den = integrate_2d_simpson(f, kx, ky) / norm
+        return den - target_density
+
+    mu_min = np.min(eps) - 2.0
+    mu_max = np.max(eps) + 2.0
+
     try:
-        mu_fm = get_mu(rho, tp, 1)
-        E_fm = 0.0
-        for i in range(N_quad):
-            for j in range(N_quad):
-                eps = dispersion(nodes_pi[i], nodes_pi[j], tp)
-                E_fm += (weights_pi[i] * weights_pi[j]) * fermi_dirac(eps, mu_fm) * eps
+        return brentq(density_diff, mu_min, mu_max, xtol=1e-8)
+    except ValueError:
+        return mu_min if density_diff(mu_min) > 0 else mu_max
 
-        mu_pm = get_mu(rho, tp, 2)
-        E_pm = compute_total_energy_pm(mu_pm, tp, U_int, nodes_pi, weights_pi)
-        is_fm = 1 if E_fm < E_pm else 0
-        return rho, tp, E_fm, E_pm, is_fm
+
+def compute_free_energy(tp, mu, n_grid=200):
+    kx = np.linspace(-np.pi, np.pi, n_grid)
+    ky = np.linspace(-np.pi, np.pi, n_grid)
+    KX, KY = np.meshgrid(kx, ky)
+
+    eps = epsilon_k_continuous(KX, KY, tp)
+    f = fermi_smooth(eps, mu)
+
+    energy = integrate_2d_simpson(eps * f, kx, ky) / (2 * np.pi) ** 2
+    return energy
+
+
+def compute_interaction_energy_vectorized(tp, mu_up, mu_down, n_q=50, n_k=48):
+    q_vec = np.linspace(-np.pi, np.pi, n_q)
+    QX, QY = np.meshgrid(q_vec, q_vec, indexing='ij')
+
+    k_vec = np.linspace(-np.pi, np.pi, n_k)
+    KX, KY = np.meshgrid(k_vec, k_vec)
+
+    p_vec = k_vec
+    PX, PY = KX, KY
+
+    eps_k = epsilon_k_continuous(KX, KY, tp)
+    f_k_up = fermi_smooth(eps_k, mu_up)
+
+  
+    eps_p = epsilon_k_continuous(PX, PY, tp)
+    f_p_up = fermi_smooth(eps_p, mu_up)
+
+    FERMI_THRESH = 1e-3
+    k_mask = f_k_up > FERMI_THRESH  
+
+   
+    p_hole_mask = (1.0 - f_p_up) > FERMI_THRESH 
+
+    n_k_active = np.sum(k_mask)
+    n_p_active = np.sum(p_hole_mask)
+    print(f"  [Mask] Active k points: {n_k_active}/{n_k**2} ({100*n_k_active/n_k**2:.1f}%)")
+    print(f"  [Mask] Active p points: {n_p_active}/{n_k**2} ({100*n_p_active/n_k**2:.1f}%)")
+
+    integrand_Q_values = np.zeros((n_q, n_q))
+
+    for i in range(n_q):
+        for j in range(n_q):
+            Qx_val = QX[i, j]
+            Qy_val = QY[i, j]
+
+            KX_prime = (Qx_val - KX + np.pi) % (2 * np.pi) - np.pi
+            KY_prime = (Qy_val - KY + np.pi) % (2 * np.pi) - np.pi
+            eps_kprime = epsilon_k_continuous(KX_prime, KY_prime, tp)
+            f_kprime_down = fermi_smooth(eps_kprime, mu_down)
+
+     
+            numerator_grid = f_k_up * f_kprime_down
+
+ 
+            if np.max(numerator_grid) < FERMI_THRESH ** 2:
+                integrand_Q_values[i, j] = 0.0
+                continue
+            PX_prime = (Qx_val - PX + np.pi) % (2 * np.pi) - np.pi
+            PY_prime = (Qy_val - PY + np.pi) % (2 * np.pi) - np.pi
+
+            eps_p_prime = epsilon_k_continuous(PX_prime, PY_prime, tp)
+            f_p_prime_down = fermi_smooth(eps_p_prime, mu_down)
+
+            hole_up   = 1.0 - f_p_up
+            hole_down = 1.0 - f_p_prime_down
+            num_p = hole_up * hole_down
+
+ 
+            combined_p_mask = (hole_up > FERMI_THRESH) & (hole_down > FERMI_THRESH)
+            num_p_masked = np.where(combined_p_mask, num_p, 0.0)
+
+          
+            if np.max(num_p_masked) < FERMI_THRESH ** 2:
+      
+                final_integrand = numerator_grid
+                res_Q = integrate_2d_simpson(final_integrand, k_vec, k_vec) / (2 * np.pi) ** 2
+                integrand_Q_values[i, j] = res_Q
+                continue
+
+          
+            omega_grid = eps_k + eps_kprime
+            denom_p_sum = eps_p + eps_p_prime
+
+            omega_4d = omega_grid[:, :, np.newaxis, np.newaxis]
+            denom_4d = denom_p_sum[np.newaxis, np.newaxis, :, :]
+            num_4d   = num_p_masked[np.newaxis, np.newaxis, :, :]  # ← 用掩码版本
+
+            D = denom_4d - omega_4d
+            kernel = D / (D ** 2 + BROADENING ** 2)
+
+            integrand_chi = num_4d * kernel
+
+            chi_int_y = simpson(integrand_chi, x=p_vec, axis=-1)
+            chi_grid  = simpson(chi_int_y,     x=p_vec, axis=-1)
+            chi_grid /= (2 * np.pi) ** 2
+
+            denominator_grid = 1.0 + U * chi_grid
+            final_integrand  = numerator_grid / denominator_grid
+
+            res_Q = integrate_2d_simpson(final_integrand, k_vec, k_vec) / (2 * np.pi) ** 2
+            integrand_Q_values[i, j] = res_Q
+
+    total_energy = integrate_2d_simpson(integrand_Q_values, q_vec, q_vec) / (2 * np.pi) ** 2
+    return total_energy
+
+
+def solve_phase_point_deltaE(args):
+    tp_over_t, density, n_grid_mu = args
+    tp =  tp_over_t * t
+
+    if density <= 1e-5:
+        return 0.0
+
+    try:
+        mu_para = compute_chemical_potential(density / 2.0, tp, n_grid=n_grid_mu)
+        E_free_para = 2.0 * compute_free_energy(tp, mu_para, n_grid=n_grid_mu)
+
+        E_int_para = compute_interaction_energy_vectorized(tp, mu_para, mu_para, n_q=48, n_k=48)
+
+        E_total_para = E_free_para + U * E_int_para
+
+        mu_ferro = compute_chemical_potential(density, tp, n_grid=n_grid_mu)
+        E_free_ferro = compute_free_energy(tp, mu_ferro, n_grid=n_grid_mu)
+        E_total_ferro = E_free_ferro
+
+        return E_total_para - E_total_ferro
+
+    except Exception as e:
+        return 0.0
+
+
+def main():
+    tp_vals = np.linspace(-0.45, -0.55, 10)
+    dens_vals = np.linspace(0.01, 0.05, 10)
+
+    n_grid_mu = 2000
+
+    tasks = [(tp, dens, n_grid_mu) for tp in tp_vals for dens in dens_vals]
+
+    try:
+        n_cores = int(os.environ['SLURM_CPUS_PER_TASK'])
     except:
-        return rho, tp, 0.0, 0.0, 0
+        n_cores = mp.cpu_count()
 
-# --- 画图功能补全 ---
-def plot_phase_diagram(results_array, rho_range, tp_range, filename_prefix):
-    rho = results_array[:, 0]
-    t_prime = results_array[:, 1]
-    is_fm = results_array[:, 4]
+    print(f"=== Hubbard Phase Diagram (Vectorized & Exact Omega) ===")
+    print(f"Cores: {n_cores}")
+    print(f"Grid: {len(tp_vals)}x{len(dens_vals)} = {len(tasks)} points")
+    print(f"Integration Mesh: n_q=24, n_k=24 (Vectorized)")
+    print(f"Physics: U={U / t}t, Broadening={BROADENING}, T_smear={T_SMEARING}")
 
-    # 创建高密度网格用于插值
-    rho_grid, tp_grid = np.meshgrid(
-        np.linspace(rho.min(), rho.max(), 200),
-        np.linspace(t_prime.min(), t_prime.max(), 200)
-    )
-
-    # 线性插值
-    points = np.column_stack((rho, t_prime))
-    phase_grid = griddata(points, is_fm, (rho_grid, tp_grid), method='linear')
-
-    # 高斯平滑处理边界锯齿
-    phase_grid_smooth = gaussian_filter(phase_grid, sigma=1.0)
-    phase_grid_binary = (phase_grid_smooth > 0.5).astype(float)
-
-    fig, ax = plt.subplots(figsize=(10, 8))
-    cmap = ListedColormap(['white', 'lightgray'])
-
-    # 绘制色块
-    ax.pcolormesh(rho_grid, tp_grid, phase_grid_binary, 
-                  cmap=cmap, shading='auto', alpha=0.8)
-
-    # 绘制相界黑线
-    ax.contour(rho_grid, tp_grid, phase_grid_smooth, 
-               levels=[0.5], colors='black', linewidths=2, alpha=0.8)
-
-    # 设置坐标轴与标签
-    ax.set_xlabel(r'Electron density $n$', fontsize=14)
-    ax.set_ylabel(r'$t^{\prime}/t$', fontsize=14)
-    ax.set_xlim(rho_range)
-    ax.set_ylim(tp_range)
-
-    # 添加图例
-    fm_patch = mpatches.Patch(color='lightgray', label='Ferromagnetic (FM)')
-    pm_patch = mpatches.Patch(color='white', label='Paramagnetic (PM)')
-    ax.legend(handles=[fm_patch, pm_patch], loc='upper right', fontsize=12)
-
-    # 标题标注热力学极限与展宽
-    ax.set_title(rf'Thermodynamic Limit Phase Diagram ($U={U_int}t$, $T={T_smear}t$)', fontsize=16)
-    ax.grid(True, linestyle='--', alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(f"{filename_prefix}.png", dpi=300, bbox_inches='tight')
-    plt.show()
-    print(f"Figures saved: {filename_prefix}.png")
-
-# --- 主程序入口 ---
-if __name__ == '__main__':
-    # 定义计算范围
-    rho_min, rho_max = 0.1, 0.7
-    tp_min, tp_max = -0.6, -0.4
-    n_rho, n_tp = 30, 30  # 网格点密度
-    
-    rho_vals = np.linspace(rho_min, rho_max, n_rho)
-    tp_vals = np.linspace(tp_min, tp_max, n_tp)
-    tasks = [(r, tp) for tp in tp_vals for r in rho_vals]
-
-    print(f"Starting computation on {len(tasks)} points (N_quad={N_quad})...")
     start_time = time.time()
 
-    # SLURM 环境适配
-    try:
-        cpus = int(os.environ['SLURM_CPUS_PER_TASK'])
-    except:
-        cpus = mp.cpu_count()
+    with mp.Pool(n_cores) as pool:
+        results = list(tqdm(pool.imap(solve_phase_point_deltaE, tasks, chunksize=1), total=len(tasks)))
 
-    with Pool(cpus) as pool:
-        results = list(tqdm(pool.imap(compute_phase_point, tasks), total=len(tasks)))
+    elapsed = (time.time() - start_time) / 60
+    print(f"Calculation finished in {elapsed:.2f} minutes.")
 
-    results_array = np.array(results)
-    
-    # 存盘
-    prefix = f"thermo_U4_T{T_smear}_n{n_rho}x{n_tp}"
-    np.savetxt(f"{prefix}_data.dat", results_array, header="rho tp E_fm E_pm is_fm")
-    
-    # 调用补全的绘图功能
-    plot_phase_diagram(results_array, (rho_min, rho_max), (tp_min, tp_max), prefix)
-    
-    print(f"Total time: {(time.time()-start_time)/60:.2f} mins.")
+    delta_E_grid = np.array(results).reshape(len(tp_vals), len(dens_vals))
+
+    filename_base = f"two_U{U:.1f}_tp{tp_vals[0]:.1f}_{tp_vals[-1]:.1f}"
+    np.savez(f"results_{filename_base}.npz", tp=tp_vals, dens=dens_vals, delta_E=delta_E_grid)
+
+    plt.figure(figsize=(10, 8))
+    X, Y = np.meshgrid(dens_vals, tp_vals)
+
+    limit = np.max(np.abs(delta_E_grid)) * 0.8
+    if limit == 0: limit = 0.1
+    norm = mcolors.TwoSlopeNorm(vmin=-limit, vcenter=0, vmax=limit)
+
+    cf = plt.contourf(X, Y, delta_E_grid, levels=100, cmap='RdBu_r', norm=norm, extend='both')
+    cbar = plt.colorbar(cf)
+    cbar.set_label(r'$\Delta E = E_{para} - E_{ferro}$')
+
+    plt.contour(X, Y, delta_E_grid, levels=[0], colors='black', linewidths=2)
+
+    plt.xlabel("Density n")
+    plt.ylabel("t'/t")
+    plt.title(f"Phase Diagram (Vectorized High-Precision)\nRed=Ferro, Blue=Para")
+
+    plt.savefig(f"PhaseDiagram_{filename_base}.png", dpi=300)
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()
