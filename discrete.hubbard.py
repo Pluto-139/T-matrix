@@ -209,8 +209,10 @@ def plot_phase_diagram(data, rho_range, tp_range, filename_prefix):
     return plot_filename
 
 if __name__ == '__main__':
-    rho_vals = np.linspace(0.01, 0.75, 40)
-    t_prime_vals = np.linspace(0.40, 0.50, 40)
+    rho_min, rho_max = 0.01, 0.75
+    tp_min, tp_max = 0.40, 0.50
+    n_rho = 40
+    n_tp = 40
     
     # 生成所有需要计算的参数对
     tasks = [(r, tp) for tp in t_prime_vals for r in rho_vals]
