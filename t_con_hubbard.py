@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 t = 1.0
 U = 4.0 * t
-T_SMEARING = 0.003 * t  # 真实的物理温度，模拟 T->0，完全移除人工 Broadening
+T_SMEARING = 0.005 * t  # 真实的物理温度，模拟 T->0，完全移除人工 Broadening
 
 def epsilon_k_continuous(kx, ky, tp):
     # 连续的色散关系
@@ -26,9 +26,12 @@ def fermi_smooth(energies, mu):
     return 1.0 / (np.exp(val) + 1.0)
 
 def integrate_2d_simpson(f_val, x_grid, y_grid):
-    # 对最后两个维度进行 2D Simpson 积分 (适用于 broadcasting 后的多维数组)
-    res_y = simpson(f_val, x=y_grid, axis=-1)
-    res_x = simpson(res_y, x=x_grid, axis=-1)
+    
+    res_y = simpson(f_val, x=y_grid, axis=1)
+    
+    # 再沿着 x 维度 (axis=0) 进行积分
+    res_x = simpson(res_y, x=x_grid, axis=0)
+    
     return res_x
 
 def compute_chemical_potential(target_density, tp, n_grid=200):
@@ -147,8 +150,8 @@ def solve_phase_point_deltaE(args):
         return 0.0
 
 def main():
-    tp_vals = np.linspace(-0.45, -0.55, 10)
-    dens_vals = np.linspace(0.01, 0.05, 10)
+    tp_vals = np.linspace(-0, -0.7, 30)
+    dens_vals = np.linspace(0.01, 0.5, 30)
     
     # 极度平滑的方程，只需要 37x37 就能达到极高的 Simpson 精度！
     N_grid = 37 
@@ -176,7 +179,7 @@ def main():
 
     delta_E_grid = np.array(results).reshape(len(tp_vals), len(dens_vals))
 
-    filename_base = f"Eq4_U{U:.1f}_tp{tp_vals[0]:.1f}_{tp_vals[-1]:.1f}"
+    filename_base = f"two_Eq4_U{U:.1f}_tp{tp_vals[0]:.1f}_{tp_vals[-1]:.1f}"
     np.savez(f"results_{filename_base}.npz", tp=tp_vals, dens=dens_vals, delta_E=delta_E_grid)
 
     plt.figure(figsize=(10, 8))
