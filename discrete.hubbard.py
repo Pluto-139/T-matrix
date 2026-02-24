@@ -1,12 +1,17 @@
 import numpy as np
-from multiprocessing import Pool
 import time
-import os
 import multiprocessing as mp
-
-t = 1.0           
-U = 4.0 * t       
-L = 48           
+from multiprocessing import Pool, cpu_count
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
+from scipy.interpolate import griddata
+from scipy.ndimage import gaussian_filter
+import matplotlib.patches as mpatches
+import os
+from tqdm import tqdm
+t = 1.0
+U = 4.0 * t
+L = 48
 Omega = L * L    
 
 def compute_phase_point(args):
@@ -31,7 +36,7 @@ def compute_phase_point(args):
     ky_val = ky_idx * 2 * np.pi / L - np.pi
     
   
-    eps = -2 * t * (np.cos(kx_val) + np.cos(ky_val)) + 4 * t_prime * np.cos(kx_val) * np.cos(ky_val)
+    eps = -2 * t * (np.cos(kx_val) + np.cos(ky_val)) - 4 * t_prime * np.cos(kx_val) * np.cos(ky_val)
     
 
     sorted_order = np.argsort(eps)
@@ -182,9 +187,9 @@ def plot_phase_diagram(data, rho_range, tp_range, filename_prefix):
 
 if __name__ == '__main__':
     rho_min, rho_max = 0.01, 0.75
-    tp_min, tp_max = 0.40, 0.50
-    n_rho = 60
-    n_tp = 60
+    tp_min, tp_max = -0.60, -0.40
+    n_rho = 40
+    n_tp = 40
     
     rho_vals = np.linspace(rho_min, rho_max, n_rho)
     t_prime_vals = np.linspace(tp_min, tp_max, n_tp)
@@ -201,26 +206,25 @@ if __name__ == '__main__':
     except:
         n_cores = mp.cpu_count()
     
-    with Pool(processes=n_cores) as pool:
-        results = pool.map(compute_phase_point, tasks)
+    with Pool(processes=num_cores) as pool:
+        results = []
+        with tqdm(total=len(tasks), desc="Computing phase points") as pbar:
+            for result in pool.imap_unordered(compute_phase_point, tasks):
+                results.append(result)
+                pbar.update(1)
     
     end_time = time.time()
     computation_time = (end_time - start_time) / 60
     print(f"Computation completed in {computation_time:.2f} minutes.")
     
-    # 将结果转换为numpy数组
     results_array = np.array(results)
     
-    # 生成带参数区间的文件名
     filename_prefix = f"phase_U4_tp{tp_min:.2f}-{tp_max:.2f}_n{rho_min:.2f}-{rho_max:.2f}"
     data_filename = f"{filename_prefix}_data.dat"
     
-    # 保存数据为文本文件
     np.savetxt(data_filename, results_array, fmt="%.6f", 
                header="rho t_prime E_fm E_pm is_fm")
     print(f"Data saved to {data_filename}")
-    
-    # 绘制相图
     plot_filename = plot_phase_diagram(results_array, 
                                       (rho_min, rho_max), 
                                       (tp_min, tp_max), 
