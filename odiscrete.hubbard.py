@@ -159,7 +159,7 @@ def plot_phase_diagram(data, rho_range, tp_range, filename_prefix):
     pm_patch = mpatches.Patch(color='white', label='Paramagnetic (PM)')
     ax.legend(handles=[fm_patch, pm_patch], loc='upper right', fontsize=12)
     
-    ax.set_title(f'Phase diagram for U = 4t\n'
+    ax.set_title(f'Phase diagram for U = {U:.2f}t\n'
                  f'$t^{{\prime}}/t$: [{tp_range[0]:.2f}, {tp_range[1]:.2f}], '
                  f'n: [{rho_range[0]:.2f}, {rho_range[1]:.2f}]', 
                  fontsize=14)
