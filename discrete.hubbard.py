@@ -11,7 +11,7 @@ import os
 from tqdm import tqdm
 t = 1.0
 U = 4.0 * t
-L = 48
+L = 32
 Omega = L * L    
 
 def compute_phase_point(args):
@@ -206,7 +206,7 @@ if __name__ == '__main__':
     except:
         n_cores = mp.cpu_count()
     
-    with Pool(processes=num_cores) as pool:
+    with Pool(processes=n_cores) as pool:
         results = []
         with tqdm(total=len(tasks), desc="Computing phase points") as pbar:
             for result in pool.imap_unordered(compute_phase_point, tasks):
