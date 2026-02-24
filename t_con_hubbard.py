@@ -150,8 +150,8 @@ def solve_phase_point_deltaE(args):
         return 0.0
 
 def main():
-    tp_vals = np.linspace(-0, -0.7, 30)
-    dens_vals = np.linspace(0.01, 0.5, 30)
+    tp_vals = np.linspace(-0, -0.7, 50)
+    dens_vals = np.linspace(0.01, 0.5, 50)
     
     # 极度平滑的方程，只需要 37x37 就能达到极高的 Simpson 精度！
     N_grid = 37 
