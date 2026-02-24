@@ -208,7 +208,7 @@ if __name__ == '__main__':
     
     results_array = np.array(results)
     
-    filename_prefix = f"phase_U{U:.2f}_tp{tp_min:.2f}-{tp_max:.2f}_n{rho_min:.2f}-{rho_max:.2f}"
+    filename_prefix = f"one_phase_U{U:.2f}_tp{tp_min:.2f}-{tp_max:.2f}_n{rho_min:.2f}-{rho_max:.2f}"
     data_filename = f"{filename_prefix}_data.dat"
     
     np.savetxt(data_filename, results_array, fmt="%.6f", 
