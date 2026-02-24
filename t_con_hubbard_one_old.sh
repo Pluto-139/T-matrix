@@ -42,6 +42,6 @@ echo "Allocated CPUs: $SLURM_CPUS_PER_TASK"
 cd /home/PERSONALE/jinghao.wang2/code
 
 
-python hubbard_one2.py
+python t_con_hubbard_one_old.py
 
 echo "Job finished at $(date)"
