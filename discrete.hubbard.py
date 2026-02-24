@@ -201,7 +201,7 @@ if __name__ == '__main__':
     except:
         n_cores = mp.cpu_count()
     
-    with Pool(processes=num_cores) as pool:
+    with Pool(processes=n_cores) as pool:
         results = pool.map(compute_phase_point, tasks)
     
     end_time = time.time()
