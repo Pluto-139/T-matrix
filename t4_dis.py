@@ -130,8 +130,8 @@ def solve_phase_point_eq4_discrete(args):
     return E_PM - E_FM
 
 def main():
-    tp_vals = np.linspace(-0.40, -0.50, 20)
-    dens_vals = np.linspace(0.15, 0.65, 20)
+    tp_vals = np.linspace(-0.40, -0.7, 50)
+    dens_vals = np.linspace(0.01, 0.8, 50)
     
     L_lattice = 32  
 
