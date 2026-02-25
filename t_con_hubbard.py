@@ -32,7 +32,7 @@ def integrate_2d_simpson(f_val, x_grid, y_grid):
     
     return res_x
 
-def compute_chemical_potential(target_density, tp, n_grid=200):
+def compute_chemical_potential(target_density, tp, n_grid=2000):
     kx = np.linspace(-np.pi, np.pi, n_grid)
     ky = np.linspace(-np.pi, np.pi, n_grid)
     KX, KY = np.meshgrid(kx, ky)
@@ -53,7 +53,7 @@ def compute_chemical_potential(target_density, tp, n_grid=200):
     except ValueError:
         return mu_min if density_diff(mu_min) > 0 else mu_max
 
-def compute_free_energy(tp, mu, n_grid=200):
+def compute_free_energy(tp, mu, n_grid=2000):
     kx = np.linspace(-np.pi, np.pi, n_grid)
     ky = np.linspace(-np.pi, np.pi, n_grid)
     KX, KY = np.meshgrid(kx, ky)
@@ -148,11 +148,11 @@ def solve_phase_point_deltaE(args):
         return 0.0
 
 def main():
-    tp_vals = np.linspace(-0, -0.7, 50)
-    dens_vals = np.linspace(0.01, 0.5, 50)
+    tp_vals = np.linspace(-0.4, -0.7, 50)
+    dens_vals = np.linspace(0.01, 0.7, 50)
     
     # 极度平滑的方程，只需要 37x37 就能达到极高的 Simpson 精度！
-    N_grid = 61
+    N_grid =61
 
     tasks = [(tp, dens, N_grid) for tp in tp_vals for dens in dens_vals]
 
