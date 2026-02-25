@@ -4,6 +4,7 @@ matplotlib.use('Agg')
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import matplotlib.patches as mpatches  # 引入用于画图例的库
 import multiprocessing as mp
 import time
 import os
@@ -13,14 +14,12 @@ from tqdm import tqdm
 
 t = 1.0
 U = 4.0 * t
-T_SMEARING = 0.005 * t  # 真实的物理温度，模拟 T->0，完全移除人工 Broadening
-
-def epsilon_k_continuous(kx, ky, tp):
-    # 连续的色散关系
+T_SMEARING = 0.01 * t  
+def
     return -2 * t * (np.cos(kx) + np.cos(ky)) - 4 * tp * np.cos(kx) * np.cos(ky)
 
 def fermi_smooth(energies, mu):
-    # 物理的费米-狄拉克分布
+
     val = (energies - mu) / T_SMEARING
     val = np.clip(val, -100, 100)
     return 1.0 / (np.exp(val) + 1.0)
@@ -29,7 +28,6 @@ def integrate_2d_simpson(f_val, x_grid, y_grid):
     
     res_y = simpson(f_val, x=y_grid, axis=1)
     
-    # 再沿着 x 维度 (axis=0) 进行积分
     res_x = simpson(res_y, x=x_grid, axis=0)
     
     return res_x
@@ -154,7 +152,7 @@ def main():
     dens_vals = np.linspace(0.01, 0.5, 50)
     
     # 极度平滑的方程，只需要 37x37 就能达到极高的 Simpson 精度！
-    N_grid = 37 
+    N_grid = 61
 
     tasks = [(tp, dens, N_grid) for tp in tp_vals for dens in dens_vals]
 
@@ -182,24 +180,30 @@ def main():
     filename_base = f"two_Eq4_U{U:.1f}_tp{tp_vals[0]:.1f}_{tp_vals[-1]:.1f}"
     np.savez(f"results_{filename_base}.npz", tp=tp_vals, dens=dens_vals, delta_E=delta_E_grid)
 
+    # ================= 修改后的绘图部分 =================
     plt.figure(figsize=(10, 8))
     X, Y = np.meshgrid(dens_vals, tp_vals)
 
-    limit = np.max(np.abs(delta_E_grid)) * 0.8
-    if limit == 0: limit = 0.1
-    norm = mcolors.TwoSlopeNorm(vmin=-limit, vcenter=0, vmax=limit)
+    # 使用边界划分：负值（顺磁）填白色，正值（铁磁）填浅灰色
+    bounds = [-np.inf, 0, np.inf]
+    plt.contourf(X, Y, delta_E_grid, levels=bounds, colors=['white', 'lightgray'])
 
-    cf = plt.contourf(X, Y, delta_E_grid, levels=100, cmap='RdBu_r', norm=norm, extend='both')
-    cbar = plt.colorbar(cf)
-    cbar.set_label(r'$\Delta E = E_{para} - E_{ferro}$')
-
+    # 画出黑色的零等能线相界
     plt.contour(X, Y, delta_E_grid, levels=[0], colors='black', linewidths=2)
 
-    plt.xlabel("Density n")
-    plt.ylabel("t'/t")
-    plt.title(f"Phase Diagram (Eq 4: Virtual Hole Excitation Included)\nRed=Ferro, Blue=Para")
+    # 绘制自定义图例
+    fm_patch = mpatches.Patch(color='lightgray', label='Ferromagnetic (FM)')
+    pm_patch = mpatches.Patch(color='white', label='Paramagnetic (PM)')
+    plt.legend(handles=[fm_patch, pm_patch], loc='upper right', framealpha=0.9)
 
-    plt.savefig(f"PhaseDiagram_{filename_base}.png", dpi=300)
+    plt.xlabel("Density $n$", fontsize=14)
+    plt.ylabel("$t^{\\prime}/t$", fontsize=14)
+    plt.title(f"Phase Diagram (Eq 4: Virtual Hole Excitation Included)\n$U={U/t}t$, $T={T_SMEARING/t}t$", fontsize=15)
+    
+    # 增加网格线更易读
+    plt.grid(True, linestyle='--', alpha=0.5)
+
+    plt.savefig(f"PhaseDiagram_{filename_base}.png", dpi=300, bbox_inches='tight')
     print("Done.")
 
 if __name__ == "__main__":
