@@ -1,0 +1,221 @@
+import matplotlib
+matplotlib.use('Agg')
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import multiprocessing as mp
+import time
+import os
+from scipy.integrate import simpson
+from scipy.optimize import brentq
+from scipy.interpolate import RegularGridInterpolator
+from tqdm import tqdm
+
+t = 1.0
+U = 4.0 * t
+T_SMEARING = 0.05 * t
+
+def epsilon_k_continuous(kx, ky, tp):
+    return -2 * t * (np.cos(kx) + np.cos(ky)) - 4 * tp * np.cos(kx) * np.cos(ky)
+
+def fermi_smooth(energies, mu):
+    val = (energies - mu) / T_SMEARING
+    val = np.clip(val, -100, 100)
+    return 1.0 / (np.exp(val) + 1.0)
+
+def integrate_2d_simpson(f_val, x_grid, y_grid):
+    return simpson(simpson(f_val, x=x_grid, axis=-1), x=y_grid, axis=-1)
+
+def compute_chemical_potential(target_density, tp, n_grid=200):
+    k_vec = np.linspace(-np.pi, np.pi, n_grid)
+    KX, KY = np.meshgrid(k_vec, k_vec)
+    eps = epsilon_k_continuous(KX, KY, tp)
+    norm = (2 * np.pi) ** 2
+
+    def density_diff(mu):
+        f = fermi_smooth(eps, mu)
+        den = integrate_2d_simpson(f, k_vec, k_vec) / norm
+        return den - target_density
+
+    mu_min = np.min(eps) - 2.0
+    mu_max = np.max(eps) + 2.0
+
+    try:
+        return brentq(density_diff, mu_min, mu_max, xtol=1e-8)
+    except ValueError:
+        return mu_min if density_diff(mu_min) > 0 else mu_max
+
+def compute_free_energy(tp, mu, n_grid=200):
+    k_vec = np.linspace(-np.pi, np.pi, n_grid)
+    KX, KY = np.meshgrid(k_vec, k_vec)
+    eps = epsilon_k_continuous(KX, KY, tp)
+    f = fermi_smooth(eps, mu)
+    energy = integrate_2d_simpson(eps * f, k_vec, k_vec) / (2 * np.pi) ** 2
+    return energy
+
+def build_chi_interpolator(tp, mu_up, mu_down, n_q=30, n_omega=30, n_p=60):
+    q_vec = np.linspace(-np.pi, np.pi, n_q)
+    
+    k_test = np.linspace(-np.pi, np.pi, 200)
+    KXT, KYT = np.meshgrid(k_test, k_test)
+    eps_test = epsilon_k_continuous(KXT, KYT, tp)
+    omega_min = 2.0 * (np.min(eps_test) - max(mu_up, mu_down))
+    # 放宽上限，防止有限温尾巴引发插值越界
+    omega_max = 0.0 + 15 * T_SMEARING 
+    omega_vec = np.linspace(omega_min, omega_max, n_omega)
+    
+    p_vec = np.linspace(-np.pi, np.pi, n_p)
+    PX, PY = np.meshgrid(p_vec, p_vec)
+    eps_p = epsilon_k_continuous(PX, PY, tp)
+    f_p_up = fermi_smooth(eps_p, mu_up)
+    
+    chi_table = np.zeros((n_q, n_q, n_omega))
+    
+    for i, qx in enumerate(q_vec):
+        for j, qy in enumerate(q_vec):
+            px_prime = (qx - PX + np.pi) % (2 * np.pi) - np.pi
+            py_prime = (qy - PY + np.pi) % (2 * np.pi) - np.pi
+            
+            eps_p_prime = epsilon_k_continuous(px_prime, py_prime, tp)
+            f_p_prime_down = fermi_smooth(eps_p_prime, mu_down)
+            
+            numerator = (1.0 - f_p_up) * (1.0 - f_p_prime_down)
+            sum_eps = (eps_p - mu_up) + (eps_p_prime - mu_down)
+            
+            num_3d = numerator[:, :, np.newaxis]
+            denom_3d = sum_eps[:, :, np.newaxis] - omega_vec[np.newaxis, np.newaxis, :]
+            
+            integrand = num_3d / denom_3d
+            
+            int_y = simpson(integrand, x=p_vec, axis=1) 
+            int_xy = simpson(int_y, x=p_vec, axis=0)    
+            
+            chi_table[i, j, :] = int_xy / (2 * np.pi)**2
+            
+    return RegularGridInterpolator((q_vec, q_vec, omega_vec), chi_table, bounds_error=False, fill_value=None)
+
+def compute_interaction_energy_interp(tp, mu_up, mu_down, n_k=50, n_q_interp=30, n_omega_interp=30, n_p_interp=60):
+    chi_interp = build_chi_interpolator(tp, mu_up, mu_down, n_q_interp, n_omega_interp, n_p_interp)
+    
+    k_vec = np.linspace(-np.pi, np.pi, n_k)
+    
+    # 核心修复：使用正交的 1D 切片构建完美的 3D 广播，彻底避免内存爆炸和形状不对齐
+    ky_vec  = k_vec[:, np.newaxis, np.newaxis]  # axis 0 控制 k_y
+    kpx_vec = k_vec[np.newaxis, :, np.newaxis]  # axis 1 控制 k'_x
+    kpy_vec = k_vec[np.newaxis, np.newaxis, :]  # axis 2 控制 k'_y
+    
+    eps_kp = epsilon_k_continuous(kpx_vec, kpy_vec, tp) # (1, n_k, n_k)
+    bar_eps_kp_down = eps_kp - mu_down
+    f_kp_down = fermi_smooth(eps_kp, mu_down)
+    
+    outer_integrals_1d = np.zeros(n_k)
+    
+    for i, kx in enumerate(k_vec):
+        eps_k = epsilon_k_continuous(kx, ky_vec, tp) # (n_k, 1, 1)
+        bar_eps_k_up = eps_k - mu_up
+        f_k_up = fermi_smooth(eps_k, mu_up)
+        
+        Qx = (kx + kpx_vec + np.pi) % (2 * np.pi) - np.pi # (1, n_k, 1)
+        Qy = (ky_vec + kpy_vec + np.pi) % (2 * np.pi) - np.pi # (n_k, 1, n_k)
+        
+        # NumPy 会自动将 (n_k,1,1) 和 (1,n_k,n_k) 完美合并为 (n_k,n_k,n_k)
+        omega_3d = bar_eps_k_up + bar_eps_kp_down 
+        
+        # 显式广播到完整 3D 形状以满足 np.stack 的要求
+        Qx_3d = np.broadcast_to(Qx, omega_3d.shape)
+        Qy_3d = np.broadcast_to(Qy, omega_3d.shape)
+        
+        pts = np.stack((Qx_3d, Qy_3d, omega_3d), axis=-1)
+        
+        chi_val = chi_interp(pts) # 返回 (n_k, n_k, n_k)
+        
+        num = f_k_up * f_kp_down
+        denom = 1.0 + U * chi_val
+        integrand = num / denom
+        
+        # 逐层应用 Simpson 积分退维
+        int_kpy = simpson(integrand, x=k_vec, axis=2)
+        int_kpx = simpson(int_kpy, x=k_vec, axis=1)
+        int_ky  = simpson(int_kpx, x=k_vec, axis=0)
+        
+        outer_integrals_1d[i] = int_ky
+        
+    total_integral = simpson(outer_integrals_1d, x=k_vec) / (2 * np.pi)**4
+    return total_integral
+
+def solve_phase_point_deltaE(args):
+    tp_over_t, density, n_grid_mu = args
+    tp =  tp_over_t * t
+
+    if density <= 1e-5: return 0.0
+
+    try:
+        mu_para = compute_chemical_potential(density / 2.0, tp, n_grid=n_grid_mu)
+        E_free_para = 2.0 * compute_free_energy(tp, mu_para, n_grid=n_grid_mu)
+        
+        E_int_para = compute_interaction_energy_interp(
+            tp, mu_para, mu_para, 
+            n_k=48, n_q_interp=32, n_omega_interp=32, n_p_interp=64
+        )
+        E_total_para = E_free_para + U * E_int_para
+
+        mu_ferro = compute_chemical_potential(density, tp, n_grid=n_grid_mu)
+        E_free_ferro = compute_free_energy(tp, mu_ferro, n_grid=n_grid_mu)
+        E_total_ferro = E_free_ferro 
+
+        return E_total_para - E_total_ferro
+
+    except Exception as e:
+        print(f"Error at tp={tp_over_t}, n={density}: {e}")
+        return 0.0
+
+def main():
+    tp_vals = np.linspace(-0.3, -0.7, 30)
+    dens_vals = np.linspace(0.01, 0.7, 30)
+    n_grid_mu = 1000
+
+    tasks = [(tp, dens, n_grid_mu) for tp in tp_vals for dens in dens_vals]
+
+    try:
+        n_cores = int(os.environ['SLURM_CPUS_PER_TASK'])
+    except:
+        n_cores = mp.cpu_count()
+
+    print(f"=== Hubbard Phase Diagram (Simpson Integration + Interpolation) ===")
+    print(f"Cores: {n_cores}")
+    print(f"Grid: {len(tp_vals)}x{len(dens_vals)} = {len(tasks)} points")
+    print(f"Physics: U={U/t}t, T_smear={T_SMEARING}")
+
+    start_time = time.time()
+
+    with mp.Pool(n_cores) as pool:
+        results = list(tqdm(pool.imap(solve_phase_point_deltaE, tasks, chunksize=1), total=len(tasks)))
+
+    elapsed = (time.time() - start_time) / 60
+    print(f"Calculation finished in {elapsed:.2f} minutes.")
+
+    delta_E_grid = np.array(results).reshape(len(tp_vals), len(dens_vals))
+    filename_base = f"two_U{U:.1f}_tp{tp_vals[0]:.1f}_{tp_vals[-1]:.1f}"
+    np.savez(f"results_{filename_base}.npz", tp=tp_vals, dens=dens_vals, delta_E=delta_E_grid)
+
+    plt.figure(figsize=(10, 8))
+    X, Y = np.meshgrid(dens_vals, tp_vals)
+    limit = np.max(np.abs(delta_E_grid)) * 0.8
+    if limit == 0: limit = 0.1
+    norm = mcolors.TwoSlopeNorm(vmin=-limit, vcenter=0, vmax=limit)
+
+    cf = plt.contourf(X, Y, delta_E_grid, levels=100, cmap='RdBu_r', norm=norm, extend='both')
+    cbar = plt.colorbar(cf)
+    cbar.set_label(r'$\Delta E = E_{para} - E_{ferro}$')
+    plt.contour(X, Y, delta_E_grid, levels=[0], colors='black', linewidths=2)
+
+    plt.xlabel("Density n")
+    plt.ylabel("t'/t")
+    plt.title(f"Phase Diagram (Simpson High-Precision)\nRed=Ferro, Blue=Para")
+
+    plt.savefig(f"PhaseDiagram_{filename_base}.png", dpi=300)
+    print("Done.")
+
+if __name__ == "__main__":
+    main()
