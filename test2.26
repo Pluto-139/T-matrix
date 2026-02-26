@@ -204,26 +204,37 @@ def main():
     elapsed = (time.time() - start_time) / 60
     print(f"Calculation finished in {elapsed:.2f} minutes.")
 
+            # 绘图部分
     delta_E_grid = np.array(results).reshape(len(tp_vals), len(dens_vals))
+    
     filename_base = f"two_U{U:.1f}_tp{tp_vals[0]:.1f}_{tp_vals[-1]:.1f}"
     np.savez(f"results_{filename_base}.npz", tp=tp_vals, dens=dens_vals, delta_E=delta_E_grid)
-
+    
+    # --- 绘图逻辑优化：严格二值化 (白与灰) ---
     plt.figure(figsize=(10, 8))
     X, Y = np.meshgrid(dens_vals, tp_vals)
-    limit = np.max(np.abs(delta_E_grid)) * 0.8
-    if limit == 0: limit = 0.1
-    norm = mcolors.TwoSlopeNorm(vmin=-limit, vcenter=0, vmax=limit)
-
-    cf = plt.contourf(X, Y, delta_E_grid, levels=100, cmap='RdBu_r', norm=norm, extend='both')
-    cbar = plt.colorbar(cf)
-    cbar.set_label(r'$\Delta E = E_{para} - E_{ferro}$')
+    
+    # 用 contourf 画出两块纯色区域：负值(顺磁)用白色，正值(铁磁)用浅灰色
+    plt.contourf(X, Y, delta_E_grid, levels=[-np.inf, 0, np.inf], colors=['white', 'lightgray'])
+    
+    # 绘制严格的零等能线作为相界边界线
     plt.contour(X, Y, delta_E_grid, levels=[0], colors='black', linewidths=2)
-
-    plt.xlabel("Density n")
-    plt.ylabel("t'/t")
-    plt.title(f"Phase Diagram (Simpson High-Precision)\nRed=Ferro, Blue=Para")
-
-    plt.savefig(f"PhaseDiagram_{filename_base}.png", dpi=300)
+    
+    # 添加自定义图例
+    import matplotlib.patches as mpatches
+    fm_patch = mpatches.Patch(color='lightgray', label='Ferromagnetic (FM)')
+    pm_patch = mpatches.Patch(color='white', label='Paramagnetic (PM)')
+    plt.legend(handles=[fm_patch, pm_patch], loc='upper right', framealpha=0.9)
+    
+    plt.xlabel("Density n", fontsize=14)
+    plt.ylabel("t'/t", fontsize=14)
+    plt.title(f"Phase Diagram (U={U/t}t)\nGray=Ferro, White=Para", fontsize=15)
+    
+    # 加上浅色网格线以便观察坐标
+    plt.grid(True, linestyle='--', alpha=0.5)
+    
+    plt.savefig(f"PhaseDiagram_{filename_base}.png", dpi=300, bbox_inches='tight')
+    print(f"Plot saved as PhaseDiagram_{filename_base}.png")
     print("Done.")
 
 if __name__ == "__main__":
