@@ -86,14 +86,17 @@ def build_chi_interpolator(tp, mu_up, mu_down, n_q=30, n_omega=30, n_p=60):
             num_3d = numerator[:, :, np.newaxis]
             denom_3d = sum_eps[:, :, np.newaxis] - omega_vec[np.newaxis, np.newaxis, :]
             
-            integrand = num_3d / denom_3d
+            # --- 核心修改 1：安全除法，防止分母为0或极小负数 ---
+            denom_safe = np.where(denom_3d > 1e-10, denom_3d, np.inf)
+            integrand = num_3d / denom_safe
             
             int_y = simpson(integrand, x=p_vec, axis=1) 
             int_xy = simpson(int_y, x=p_vec, axis=0)    
             
             chi_table[i, j, :] = int_xy / (2 * np.pi)**2
             
-    return RegularGridInterpolator((q_vec, q_vec, omega_vec), chi_table, bounds_error=False, fill_value=None)
+    # --- 核心修改 2：越界查表时返回 0.0，而不是 None（避免错误外推） ---
+    return RegularGridInterpolator((q_vec, q_vec, omega_vec), chi_table, bounds_error=False, fill_value=0.0)
 
 def compute_interaction_energy_interp(tp, mu_up, mu_down, n_k=50, n_q_interp=30, n_omega_interp=30, n_p_interp=60):
     chi_interp = build_chi_interpolator(tp, mu_up, mu_down, n_q_interp, n_omega_interp, n_p_interp)
@@ -113,8 +116,14 @@ def compute_interaction_energy_interp(tp, mu_up, mu_down, n_k=50, n_q_interp=30,
     
     for i, kx in enumerate(k_vec):
         eps_k = epsilon_k_continuous(kx, ky_vec, tp) # (n_k, 1, 1)
-        bar_eps_k_up = eps_k - mu_up
         f_k_up = fermi_smooth(eps_k, mu_up)
+        
+        # --- 核心修改 3：物理掩码加速，跳过完全空带的切片 ---
+        if np.max(f_k_up) < 1e-6:
+            outer_integrals_1d[i] = 0.0
+            continue
+            
+        bar_eps_k_up = eps_k - mu_up
         
         Qx = (kx + kpx_vec + np.pi) % (2 * np.pi) - np.pi # (1, n_k, 1)
         Qy = (ky_vec + kpy_vec + np.pi) % (2 * np.pi) - np.pi # (n_k, 1, n_k)
